@@ -3233,12 +3233,6 @@ const SS = {
   set lastSync(v)  { if(DEMO_MODE) return; localStorage.setItem(SYNC_KEYS.lastSync,v); },
   get lastStatus() { if(DEMO_MODE) return 'none'; return localStorage.getItem(SYNC_KEYS.lastStatus)||'none'; },
   set lastStatus(v){ if(DEMO_MODE) return; localStorage.setItem(SYNC_KEYS.lastStatus,v); },
-  get spSite(){return localStorage.getItem('psp-sp-site')||'';},
-  set spSite(v){localStorage.setItem('psp-sp-site',v);},
-  get spFolder(){return localStorage.getItem('psp-sp-folder')||'';},
-  set spFolder(v){localStorage.setItem('psp-sp-folder',v);},
-  get spLastBackup(){return localStorage.getItem('psp-sp-last')||null;},
-  set spLastBackup(v){localStorage.setItem('psp-sp-last',v);},
 };
 
 function buildSyncPayload(date) {
@@ -3363,20 +3357,6 @@ function renderAdminSync() {
           '<div style="font-size:13px;color:#1e4d8c;line-height:1.7;">'+s.body+'</div></div>' +
         '</div>';
       }).join('') +
-    '</div>' +
-
-    '<div class="card" style="margin-top:18px;border:2px solid #d4a017;background:#fdf6d8;">' +
-      '<div style="font-size:15px;font-weight:700;color:#0d1f3c;margin-bottom:4px;">☁️ SharePoint Backup</div>' +
-      '<div style="font-size:13px;color:#7a5500;margin-bottom:14px;">One-click backup of today\'s data as a CSV directly to your SharePoint Test folder.</div>' +
-      '<div style="margin-bottom:10px;"><div style="font-size:11px;color:#7a5500;font-weight:700;text-transform:uppercase;margin-bottom:5px;">SharePoint Site URL</div>' +
-        '<input type="text" id="sp-site-inp" value="'+esc(SS.spSite)+'" placeholder="https://yourschool.sharepoint.com/sites/YourSite" style="width:100%;font-size:12px;"/></div>' +
-      '<div style="margin-bottom:12px;"><div style="font-size:11px;color:#7a5500;font-weight:700;text-transform:uppercase;margin-bottom:5px;">Folder Path</div>' +
-        '<input type="text" id="sp-folder-inp" value="'+esc(SS.spFolder)+'" placeholder="/Shared Documents/BehaviorData" style="width:100%;font-size:12px;"/></div>' +
-      '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">' +
-        '<button class="btn btn-primary" onclick="saveSpConfig()">Save Config</button>' +
-        '<button class="btn" style="background:#d4a017;color:#0d1f3c;font-weight:700;" onclick="backupToSharePoint()">☁️ Backup Today to SharePoint</button>' +
-        (SS.spLastBackup ? '<span style="font-size:11px;color:#5a80b8;">Last: '+esc(SS.spLastBackup)+'</span>' : '') +
-      '</div>' +
     '</div>';
 }
 function openKiosk(student, fromLogin) {
@@ -3605,117 +3585,8 @@ function pwaInit() {
    SHAREPOINT DIRECT BACKUP
 ═══════════════════════════════════════════════════════════ */
 
-function buildCSVContent(date) {
-  const rows = [];
-  const headers = ['Date','Student','FirstName','LastName','Grade','Teacher','Period','GoalName','Score','PeriodTotal','PeriodPct'];
-  rows.push(headers.join(','));
 
-  STATE.students.forEach(function(name) {
-    const goals = getStudentGoals(name);
-    const inf = STATE.studentInfo[name] || {};
-    const dd = STATE.data[name] && STATE.data[name][date];
-    if(!dd) return;
 
-    PERIODS.forEach(function(period) {
-      const ps = dd[period] || {};
-      const periodSum = goals.reduce(function(a,g){return a+(ps[g.id]||0);},0);
-      const periodCount = goals.filter(function(g){return ps[g.id]!=null;}).length;
 
-      goals.forEach(function(g) {
-        if(ps[g.id] == null) return;
-        var row = [
-          date,
-          '"'+name+'"',
-          '"'+(inf.firstName||'')+'"',
-          '"'+(inf.lastName||'')+'"',
-          '"'+(inf.grade||'')+'"',
-          '"'+(inf.teacher||'')+'"',
-          '"'+period+'"',
-          '"'+g.label+'"',
-          ps[g.id],
-          periodCount>0?periodSum:'',
-          periodCount>0?Math.round(pct(periodSum,periodCount)):''
-        ];
-        rows.push(row.join(','));
-      });
-    });
-  });
-
-  return rows.join('\n');
-}
-
-async function backupToSharePoint() {
-  const site = SS.spSite.trim();
-  const folder = SS.spFolder.trim();
-  const date = STATE.selDate || todayKey();
-
-  if(!site || !folder) {
-    toast('Please configure SharePoint site and folder first.', 'error');
-    adminTab('sync');
-    return;
-  }
-
-  const csv = buildCSVContent(date);
-  if(!csv || csv.split('\n').length < 2) {
-    toast('No data to backup for ' + date, 'error');
-    return;
-  }
-
-  const fileName = 'PointSheet_' + date + '.csv';
-  showSyncBanner('Backing up to SharePoint…', 'spin', true);
-
-  try {
-    // Use SharePoint REST API to upload file
-    const uploadUrl = site.replace(/\/$/, '') + 
-      "/_api/web/GetFolderByServerRelativeUrl('" + encodeURIComponent(folder) + "')" +
-      "/Files/add(url='" + encodeURIComponent(fileName) + "',overwrite=true)";
-
-    const resp = await fetch(uploadUrl, {
-      method: 'POST',
-      headers: {
-        'Accept': 'application/json;odata=verbose',
-        'Content-Type': 'text/csv',
-        'X-RequestDigest': await getSPDigest(site),
-      },
-      body: csv,
-      credentials: 'include',
-    });
-
-    if(resp.ok) {
-      SS.spLastBackup = new Date().toLocaleString();
-      showSyncBanner('Backed up to SharePoint ✅ — ' + fileName, '✅', false);
-      adminTab('sync');
-    } else {
-      const err = await resp.text();
-      throw new Error('HTTP ' + resp.status + ': ' + err.slice(0,100));
-    }
-  } catch(e) {
-    showSyncBanner('SharePoint backup failed: ' + e.message, '❌', false);
-    toast('Backup failed — make sure you are logged into BPS SharePoint in this browser.', 'error');
-  }
-}
-
-async function getSPDigest(site) {
-  try {
-    const resp = await fetch(site.replace(/\/$/, '') + '/_api/contextinfo', {
-      method: 'POST',
-      headers: { 'Accept': 'application/json;odata=verbose' },
-      credentials: 'include',
-    });
-    const data = await resp.json();
-    return data.d.GetContextWebInformation.FormDigestValue;
-  } catch(e) {
-    return '';
-  }
-}
-
-function saveSpConfig() {
-  var site = (document.getElementById('sp-site-inp') || {}).value || '';
-  var folder = (document.getElementById('sp-folder-inp') || {}).value || '';
-  SS.spSite = site.trim();
-  SS.spFolder = folder.trim();
-  toast('SharePoint config saved!');
-  adminTab('sync');
-}
 
 
