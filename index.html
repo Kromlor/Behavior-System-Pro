@@ -351,7 +351,6 @@ input:focus,select:focus{border-color:#1a3a6b;}
 <!-- TOAST -->
 <div id="toast"></div>
 
-
 <script>
 /* ═══════════════════════════════════════════════
    CONSTANTS
@@ -587,7 +586,7 @@ function balanceOf(name) {
 let STATE = {
   // PointSheet
   accounts:    lsGet(SK.accounts) || [
-    {id:"admin1",  username:"Admin", password:"1234", role:"admin", displayName:"Administrator", mustChangePassword:false},
+    {id:"admin1",  username:"Admin", password:"1234", role:"admin", displayName:"Administrator", mustChangePassword:true},
   ],
   students:    lsGet(SK.students)    || JSON.parse(JSON.stringify(SEED_STUDENTS)),
   studentInfo: lsGet(SK.studentInfo) || JSON.parse(JSON.stringify(SEED_STUDENT_INFO)),
@@ -901,6 +900,7 @@ function renderSidebar() {
     nav += navItem("weekly",   "📅", "Weekly Report", v);
     nav += navItem("tabulate", "🔢", "Tabulate", v);
     nav += navItem("students", "👥", "Student Info", v);
+    nav += navItem("import-email", "📥", "Import Email", v);
   }
 
   // Store section — CM + Admin only
@@ -1019,6 +1019,7 @@ function renderContent() {
     case "store-inventory":  el.innerHTML = renderInventory(); break;
     case "store-balances":   el.innerHTML = renderBalances(); break;
     case "store-purchases":  el.innerHTML = renderPurchasesView(); break;
+    case "import-email":     el.innerHTML = renderImportEmail(); break;
     case "store-email":      el.innerHTML = renderEmailView(); break;
     case "admin-dashboard":  el.innerHTML = renderDashboard(); break;
     case "admin-users":      el.innerHTML = renderUsers(); break;
@@ -1061,6 +1062,7 @@ function renderTracker() {
     '<div style="margin-left:auto;display:flex;gap:8px;">' +
       '<button class="btn btn-secondary btn-sm" onclick="exportDayCSV()">⬇ CSV</button>' +
       '<button class="btn btn-secondary btn-sm" onclick="printTracker()">🖨 Print</button>' +
+      '<button class="btn btn-primary btn-sm" onclick="sendBehaviorEmail()" title="Email today\'s behavior data to case manager">📧 Send to CM</button>' +
     '</div>' +
   '</div>';
 
@@ -1666,7 +1668,8 @@ function openAddUser() {
     '<div class="modal-field"><label>Display Name</label><input type="text" id="u-name"/></div>' +
     '<div class="modal-field"><label>Username</label><input type="text" id="u-user" autocapitalize="none"/></div>' +
     '<div class="modal-field"><label>Password</label><input type="password" id="u-pw"/></div>' +
-    '<div class="modal-field"><label>Role</label><select id="u-role"><option value="teacher">Teacher</option><option value="casemanager">Case Manager</option><option value="admin">Admin</option></select></div>' +
+    '<div class="modal-field"><label>Role</label><select id="u-role"><option value="teacher">Teacher</option><option value="casemanager">Case Manager</option><option value="admin">Admin</option></select></div> +
+    '<div class="modal-field"><label>Email <span style="color:#888;font-weight:400">(case manager/admin — for receiving daily reports)</span></label><input type="email" id="u-email" placeholder="user@school.org"/></div>'' +
     '<div class="modal-field"><label>Subject (e.g. Math) — for teachers</label><input type="text" id="u-subject" placeholder="e.g. Math, ELA, Science"/></div>' +
     '<div class="modal-actions">' +
       '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
@@ -1682,11 +1685,12 @@ async function doAddUser() {
   const pw   = (document.getElementById('u-pw').value||'').trim();
   const role = document.getElementById('u-role').value;
   const subject = (document.getElementById('u-subject').value||'').trim();
+  const email = (document.getElementById('u-email') ? document.getElementById('u-email').value||'' : '').trim();
   if (!name||!user||!pw) { toast('All fields required.','error'); return; }
   if (STATE.accounts.find(a=>a.username.toLowerCase()===user)) { toast('Username already taken.','error'); return; }
   const hashed = await hashPassword(pw);
   const id = 'u_' + Date.now();
-  STATE.accounts.push({id, username:user, password:hashed, role, displayName:name, subject});
+  STATE.accounts.push({id, username:user, password:hashed, role, displayName:name, subject, email});
   save('accounts');
   closeModal();
   toast('User added.');
@@ -1705,6 +1709,7 @@ function openEditUser(id) {
       ['teacher','casemanager','admin'].map(r=>'<option value="'+r+'"'+(r===a.role?' selected':'')+'>'+r+'</option>').join('') +
     '</select></div>' +
     '<div class="modal-field"><label>Subject (e.g. Math) — for teachers</label><input type="text" id="u-subject" value="'+esc(a.subject||'')+'" placeholder="e.g. Math, ELA, Science"/></div>' +
+    '<div class="modal-field"><label>Email <span style="color:#888;font-weight:400">(case manager/admin — for daily reports)</span></label><input type="email" id="u-email" value="'+esc(a.email||'')+'" placeholder="user@school.org"/></div>' +
     '<div class="modal-actions">' +
       '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
       '<button class="btn btn-primary" onclick="doEditUser(\''+esc(id)+'\')">Save</button>' +
@@ -1724,7 +1729,9 @@ async function doEditUser(id) {
   if (dup) { toast('Username already taken.','error'); return; }
   a.displayName = name;
   a.username = user;
+  a.role = document.getElementById('u-role') ? document.getElementById('u-role').value : a.role;
   a.subject = (document.getElementById('u-subject').value||'').trim();
+  a.email = (document.getElementById('u-email') ? document.getElementById('u-email').value||'' : '').trim();
   if (pw) a.password = await hashPassword(pw);
   save('accounts');
   closeModal();
@@ -2043,6 +2050,100 @@ function exportDayCSV() {
     });
   });
   downloadCSV('behavior-'+date+'.csv', rows);
+}
+
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   EMAIL BEHAVIOR DATA  (teacher → case manager)
+══════════════════════════════════════════════════════════════════════════════ */
+function sendBehaviorEmail() {
+  const date     = STATE.selDate;
+  const students = visibleStudents();
+  if (!students.length) { toast('No students visible to report.', 'error'); return; }
+
+  /* ── Find case managers with emails ────────────────────────────── */
+  const cms = STATE.accounts.filter(function(a) {
+    return (a.role === 'casemanager' || a.role === 'admin') && a.email && a.email.trim();
+  });
+
+  /* ── Fall back: ask teacher to enter email if none configured ───── */
+  if (!cms.length) {
+    const raw = prompt(
+      'No case manager email found.\n\nEnter the case manager\'s email address(es),\nseparated by commas:');
+    if (!raw || !raw.trim()) return;
+    sendEmailTo(raw.trim(), date, students);
+    return;
+  }
+
+  const toAddresses = cms.map(function(a){ return a.email.trim(); }).join(',');
+  sendEmailTo(toAddresses, date, students);
+}
+
+function sendEmailTo(toAddresses, date, students) {
+  const sender  = STATE.currentUser ? STATE.currentUser.displayName || STATE.currentUser.username : 'Teacher';
+  const fmtD    = fmtDate(date);
+
+  /* ── Build subject ─────────────────────────────────────────────── */
+  const subject = encodeURIComponent('Behavior Data – ' + fmtD + ' (' + sender + ')');
+
+  /* ── Build body ────────────────────────────────────────────────── */
+  let lines = [];
+  lines.push('Daily Behavior Report');
+  lines.push('Date: ' + fmtD);
+  lines.push('Submitted by: ' + sender);
+  lines.push('');
+
+  students.forEach(function(name) {
+    const goals   = getStudentGoals(name);
+    const dayData = (STATE.data[name]||{})[date]||{};
+    const inf     = STATE.studentInfo[name]||{};
+    const displayName = (inf.firstName ? inf.firstName + ' ' + (inf.lastName||'') : name).trim();
+
+    lines.push('── ' + displayName + ' ──────────────────────────');
+
+    const periods = visiblePeriodsFor(name);
+    if (!periods.length) {
+      lines.push('  (no periods assigned)');
+    } else {
+      periods.forEach(function(period) {
+        const ps    = dayData[period]||{};
+        const label = period === 'HB' ? 'Home Base' : 'Period ' + period.replace('P','');
+        let scored  = goals.filter(function(g){ return ps[g.id] != null; });
+
+        if (!scored.length) {
+          lines.push('  ' + label + ': no data entered');
+        } else {
+          const ptsEarned  = scored.reduce(function(s,g){ return s + (ps[g.id]||0); }, 0);
+          const ptsPossible= scored.length * 2;
+          const pct        = ptsPossible ? Math.round(ptsEarned/ptsPossible*100) : 0;
+          lines.push('  ' + label + ': ' + ptsEarned + '/' + ptsPossible + ' pts (' + pct + '%)');
+          scored.forEach(function(g){
+            const val = ps[g.id];
+            const star = val === 2 ? '✓' : val === 1 ? '~' : '✗';
+            lines.push('    ' + star + ' ' + g.label + ': ' + val + '/2');
+          });
+        }
+      });
+    }
+    lines.push('');
+  });
+
+  lines.push('── END OF REPORT ──────────────────────────────────');
+  lines.push('');
+  lines.push('Generated by Behavior System Pro');
+
+  const body = encodeURIComponent(lines.join('\r\n'));
+
+  /* ── Open mailto link ───────────────────────────────────────────── */
+  const mailto = 'mailto:' + toAddresses + '?subject=' + subject + '&body=' + body;
+
+  // mailto URIs have a ~2,000-char limit in some clients; warn if too long
+  if (mailto.length > 1900) {
+    // Silently proceed – Outlook on Windows handles much longer URIs
+  }
+
+  window.location.href = mailto;
+  toast('Opening email in your mail client…', 'success');
 }
 
 function exportStudentCSV() {
@@ -2649,25 +2750,227 @@ function dfImportJson() {
   inp.click();
 }
 
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   IMPORT EMAIL REPORT  (CM/Admin pastes teacher email → data saved to app)
+══════════════════════════════════════════════════════════════════════════════ */
+function renderImportEmail() {
+  setTopbarTitle('Import Email Report');
+  return (
+    '<div class="section-header"><div class="section-title">📥 Import Email Report</div></div>' +
+    '<div class="card" style="max-width:700px;">' +
+      '<p style="margin:0 0 10px;">Paste the behavior report email body below, then click <strong>Import Data</strong>.<br>' +
+      '<span class="text-muted" style="font-size:12px;">The app will read the student scores and save them — no manual re-entry needed.</span></p>' +
+      '<textarea id="email-import-box" rows="18" style="width:100%;font-family:monospace;font-size:12px;' +
+        'border:1.5px solid #b0c8e8;border-radius:6px;padding:10px;resize:vertical;box-sizing:border-box;" ' +
+        'placeholder="Paste the full email body here…"></textarea>' +
+      '<div style="margin-top:10px;display:flex;gap:8px;align-items:center;">' +
+        '<button class="btn btn-primary" onclick="doImportEmail()">📥 Import Data</button>' +
+        '<button class="btn btn-secondary" onclick="document.getElementById(\'email-import-box\').value=\'\'">Clear</button>' +
+        '<span id="import-email-status" style="font-size:13px;color:#2e7d32;"></span>' +
+      '</div>' +
+      '<div id="import-email-preview" style="margin-top:14px;"></div>' +
+    '</div>'
+  );
+}
+
+function doImportEmail() {
+  const raw = (document.getElementById('email-import-box').value || '').trim();
+  if (!raw) { toast('Paste an email body first.', 'error'); return; }
+
+  const result = parseEmailReport(raw);
+  if (!result.rows.length) {
+    document.getElementById('import-email-status').textContent = '';
+    document.getElementById('import-email-preview').innerHTML =
+      '<div class="iep-alert" style="background:#fff3cd;border-color:#ffc107;color:#856404;">' +
+      '⚠️ No data found. Make sure you pasted the full email body generated by Behavior System Pro.</div>';
+    return;
+  }
+
+  // Save parsed rows into STATE.data
+  let saved = 0, skipped = 0;
+  result.rows.forEach(function(row) {
+    const { student, date, period, scores } = row;
+    if (!STATE.students.includes(student)) { skipped++; return; }
+    if (!STATE.data[student]) STATE.data[student] = {};
+    if (!STATE.data[student][date]) STATE.data[student][date] = {};
+    const existing = STATE.data[student][date][period] || {};
+    // Merge: only fill in blanks — don't overwrite scores already entered
+    const goals = getStudentGoals(student);
+    goals.forEach(function(g, i) {
+      if (scores[i] !== null && scores[i] !== '' && existing[g.id] == null) {
+        existing[g.id] = scores[i];
+      }
+    });
+    STATE.data[student][date][period] = existing;
+    saved++;
+  });
+  save('data');
+
+  // Show preview table
+  const dateLabel = result.date ? fmtDate(result.date) : '(date from email)';
+  const teacher   = result.teacher || '(unknown teacher)';
+  let rows = result.rows;
+
+  let tbl = '<table class="data-table" style="font-size:12px;width:100%;">' +
+    '<thead><tr><th>Student</th><th>Period</th><th>Pts</th><th>%</th><th>Status</th></tr></thead><tbody>';
+  rows.forEach(function(row) {
+    const ok = STATE.students.includes(row.student);
+    tbl += '<tr>' +
+      '<td>' + esc(row.student) + '</td>' +
+      '<td>' + esc(row.period) + '</td>' +
+      '<td>' + row.ptsEarned + '/' + row.ptsPossible + '</td>' +
+      '<td>' + row.pct + '%</td>' +
+      '<td style="color:' + (ok ? '#2e7d32' : '#c62828') + '">' +
+        (ok ? '✓ Saved' : '✗ Student not found') + '</td>' +
+    '</tr>';
+  });
+  tbl += '</tbody></table>';
+
+  const statusEl = document.getElementById('import-email-status');
+  statusEl.innerHTML = '✓ Saved ' + saved + ' period record(s)' +
+    (skipped ? ' · ' + skipped + ' skipped (student not in roster)' : '');
+  document.getElementById('import-email-preview').innerHTML =
+    '<div style="margin-bottom:6px;font-size:12px;color:#555;">' +
+      '<strong>Date:</strong> ' + esc(dateLabel) + ' &nbsp;|&nbsp; ' +
+      '<strong>From:</strong> ' + esc(teacher) +
+    '</div>' + tbl;
+
+  if (saved) toast('Imported ' + saved + ' period record(s).', 'success');
+}
+
+/* Parse the plain-text email body generated by sendBehaviorEmail() */
+function parseEmailReport(text) {
+  const lines  = text.split(/\r?\n/);
+  let date     = '';
+  let teacher  = '';
+  let rows     = [];
+  let curStudent = null;
+  let curPeriod  = null;
+  let curGoalIdx = 0;
+  let curScores  = [];
+  let curEarned  = 0;
+  let curPossible= 0;
+
+  // Extract header fields
+  lines.forEach(function(line) {
+    const dateLine    = line.match(/^Date:\s*(.+)/i);
+    const teacherLine = line.match(/^Submitted by:\s*(.+)/i);
+    if (dateLine)    date    = parseDateLabel(dateLine[1].trim());
+    if (teacherLine) teacher = teacherLine[1].trim();
+  });
+
+  function flushPeriod() {
+    if (!curStudent || !curPeriod || !date) return;
+    // curScores is array of {goalLabel, val}
+    rows.push({
+      student:     curStudent,
+      date:        date,
+      period:      curPeriod,
+      scores:      curScores.map(function(s){ return s.val; }),
+      ptsEarned:   curEarned,
+      ptsPossible: curPossible,
+      pct:         curPossible ? Math.round(curEarned / curPossible * 100) : 0
+    });
+  }
+
+  lines.forEach(function(line) {
+    // Student header: "── Jordan K. ────"
+    const studentMatch = line.match(/^──\s+(.+?)\s+─+/);
+    if (studentMatch && !line.match(/END OF REPORT/)) {
+      flushPeriod();
+      curStudent  = studentMatch[1].trim();
+      curPeriod   = null;
+      curScores   = [];
+      curEarned   = 0;
+      curPossible = 0;
+      return;
+    }
+
+    // Period header: "  Home Base: 6/8 pts (75%)" or "  Period 3: 6/8 pts (75%)"
+    const periodMatch = line.match(/^\s+(Home Base|Period\s+\d+):\s*(\d+)\/(\d+)\s+pts\s*\((\d+)%\)/i);
+    if (periodMatch) {
+      flushPeriod();
+      const label = periodMatch[1].trim();
+      curPeriod   = label === 'Home Base' ? 'HB' : 'P' + label.replace(/Period\s+/i, '');
+      curEarned   = parseInt(periodMatch[2], 10);
+      curPossible = parseInt(periodMatch[3], 10);
+      curScores   = [];
+      return;
+    }
+
+    // Goal line: "    ✓ On Task: 2/2" or "    ~ Follow Directions: 1/2" or "    ✗ Respectful: 0/2"
+    const goalMatch = line.match(/^\s+[✓~✗☑☐]\s+(.+?):\s*(\d+)\/\d+/);
+    if (goalMatch && curPeriod) {
+      curScores.push({ goalLabel: goalMatch[1].trim(), val: parseInt(goalMatch[2], 10) });
+      return;
+    }
+
+    // No-data line: "  Period 3: no data entered"
+    const noDataMatch = line.match(/^\s+(Home Base|Period\s+\d+):\s*no data entered/i);
+    if (noDataMatch) {
+      flushPeriod();
+      curPeriod   = null;
+      curScores   = [];
+      curEarned   = 0;
+      curPossible = 0;
+    }
+  });
+
+  flushPeriod();
+  return { date, teacher, rows };
+}
+
+/* Convert a display date like "Friday, October 9, 2026" back to YYYY-MM-DD */
+function parseDateLabel(label) {
+  // Try direct ISO first
+  if (/^\d{4}-\d{2}-\d{2}$/.test(label)) return label;
+  // Try "Month D, YYYY" or "DayName, Month D, YYYY"
+  const d = new Date(label);
+  if (!isNaN(d.getTime())) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth()+1).padStart(2,'0');
+    const day = String(d.getDate()).padStart(2,'0');
+    return y + '-' + m + '-' + day;
+  }
+  return label; // fallback, may not match — user can correct
+}
+
 async function exportFullXLSX() {
   const students = STATE.students;
-  const goals = DEFAULT_GOALS; // use default for export header
-  const headers = ['Student','Date','Period',...goals.map(g=>g.label),'Period Total','Period %'];
+
+  // Build a master ordered goal list: DEFAULT_GOALS first, then any custom goals
+  // that appear on any student but aren't already in the list.
+  const masterGoals = DEFAULT_GOALS.slice();
+  const masterIds = new Set(masterGoals.map(function(g){return g.id;}));
+  students.forEach(function(name) {
+    getStudentGoals(name).forEach(function(g) {
+      if (!masterIds.has(g.id)) { masterGoals.push(g); masterIds.add(g.id); }
+    });
+  });
+
+  const headers = ['Student','Date','Period',...masterGoals.map(function(g){return g.label;}),'Period Total','Period %'];
   const rows = [headers];
+
   students.forEach(function(name) {
     const d = STATE.data[name]||{};
     Object.keys(d).sort().forEach(function(dateKey) {
       PERIODS.forEach(function(period) {
-        const sGoals = getStudentGoals(name);
-        const ps = d[dateKey][period]||{};
-        let pSum=0,pCount=0;
-        const scores = sGoals.map(function(g){ const v=ps[g.id]; if(v!=null){pSum+=v;pCount++;} return v!=null?v:''; });
-        // Pad to match header count
-        while(scores.length<goals.length) scores.push('');
-        rows.push([name,dateKey,period,...scores,pCount?pSum:'',pCount?pct(pSum,pCount):'']);
+        const ps = d[dateKey]&&d[dateKey][period] ? d[dateKey][period] : {};
+        // Check if this period has any data at all; skip entirely if empty
+        const hasData = Object.keys(ps).length > 0;
+        if (!hasData) return;
+        let pSum=0, pCount=0;
+        const scores = masterGoals.map(function(g) {
+          const v = ps[g.id];
+          if (v != null) { pSum += v; pCount++; }
+          return v != null ? v : '';
+        });
+        rows.push([name, dateKey, period, ...scores, pCount ? pSum : '', pCount ? pct(pSum, pCount) : '']);
       });
     });
   });
+
   await downloadXLSX('behavior-data-'+todayKey()+'.xlsx', [{name:'Behavior Data',rows}]);
 }
 
@@ -3359,6 +3662,14 @@ function renderAdminSync() {
       }).join('') +
     '</div>';
 }
+
+/* ═══════════════════════════════════════════════
+   KIOSK (Student-facing store browser)
+═══════════════════════════════════════════════ */
+let _kioskStudent = '';
+let _kioskCart = {};
+let _kioskFromLogin = false;
+
 function openKiosk(student, fromLogin) {
   _kioskStudent = student || '';
   _kioskCart = {};
