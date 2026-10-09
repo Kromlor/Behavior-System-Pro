@@ -2249,17 +2249,23 @@ async function zipWrite(files) {
 
   const centralDir = entries.map(function(e) {
     return new Uint8Array([
-      0x50,0x4B,0x01,0x02, // sig
-      20,0,20,0,           // versions
-      0,0,8,0,             // flags, method
-      0,0,0,0,             // time/date
-      ...u32le(e.crc),
-      ...u32le(e.compSize),
-      ...u32le(e.origSize),
-      ...u16le(e.name.length),
-      0,0,0,0,0,0,         // extra, comment, disk, attrs
-      ...u32le(0),
-      ...u32le(e.offset),
+      0x50,0x4B,0x01,0x02, // central dir sig
+      20,0,                // version made by (2.0)
+      20,0,                // version needed (2.0)
+      0,0,                 // general purpose flags
+      8,0,                 // compression method: deflate
+      0,0,                 // last mod time
+      0,0,                 // last mod date
+      ...u32le(e.crc),     // crc-32
+      ...u32le(e.compSize),// compressed size
+      ...u32le(e.origSize),// uncompressed size
+      ...u16le(e.name.length), // file name length
+      0,0,                 // extra field length
+      0,0,                 // file comment length
+      0,0,                 // disk number start
+      0,0,                 // internal file attributes
+      0,0,0,0,             // external file attributes
+      ...u32le(e.offset),  // relative offset of local header
       ...e.name,
     ]);
   });
