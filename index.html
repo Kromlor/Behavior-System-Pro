@@ -2080,69 +2080,95 @@ function sendBehaviorEmail() {
 }
 
 function sendEmailTo(toAddresses, date, students) {
-  const sender  = STATE.currentUser ? STATE.currentUser.displayName || STATE.currentUser.username : 'Teacher';
-  const fmtD    = fmtDate(date);
+  const sender    = STATE.currentUser ? STATE.currentUser.displayName || STATE.currentUser.username : 'Teacher';
+  const fmtD      = fmtDate(date);
+  const ws        = STATE.weekStart;
+  const weekDates = [0,1,2,3,4].map(function(d){ return addDays(ws, d); });
+  const dayLabels = ['Mon','Tue','Wed','Thu','Fri'];
+  const weekLabel = fmtDate(ws) + ' – ' + fmtDate(addDays(ws, 4));
 
-  /* ── Build subject ─────────────────────────────────────────────── */
-  const subject = encodeURIComponent('Behavior Data – ' + fmtD + ' (' + sender + ')');
+  const subject = encodeURIComponent('Behavior Report – ' + fmtD + ' (' + sender + ')');
 
-  /* ── Build body ────────────────────────────────────────────────── */
+  function pad(s, w) { s = String(s); return s.length >= w ? s : s + ' '.repeat(w - s.length); }
+  const COL = 7;
+
   let lines = [];
-  lines.push('Daily Behavior Report');
+  lines.push('Behavior Report');
   lines.push('Date: ' + fmtD);
+  lines.push('Week: ' + weekLabel);
   lines.push('Submitted by: ' + sender);
-  lines.push('');
 
   students.forEach(function(name) {
     const goals   = getStudentGoals(name);
-    const dayData = (STATE.data[name]||{})[date]||{};
-    const inf     = STATE.studentInfo[name]||{};
+    const inf     = STATE.studentInfo[name] || {};
     const displayName = (inf.firstName ? inf.firstName + ' ' + (inf.lastName||'') : name).trim();
-
-    lines.push('── ' + displayName + ' ──────────────────────────');
-
     const periods = visiblePeriodsFor(name);
+    const dayData = (STATE.data[name]||{})[date]||{};
+
+    lines.push('');
+    lines.push('══ ' + displayName + ' ' + '═'.repeat(Math.max(2, 44 - displayName.length)));
+
     if (!periods.length) {
       lines.push('  (no periods assigned)');
-    } else {
-      periods.forEach(function(period) {
-        const ps    = dayData[period]||{};
-        const label = period === 'HB' ? 'Home Base' : 'Period ' + period.replace('P','');
-        let scored  = goals.filter(function(g){ return ps[g.id] != null; });
-
-        if (!scored.length) {
-          lines.push('  ' + label + ': no data entered');
-        } else {
-          const ptsEarned  = scored.reduce(function(s,g){ return s + (ps[g.id]||0); }, 0);
-          const ptsPossible= scored.length * 2;
-          const pct        = ptsPossible ? Math.round(ptsEarned/ptsPossible*100) : 0;
-          lines.push('  ' + label + ': ' + ptsEarned + '/' + ptsPossible + ' pts (' + pct + '%)');
-          scored.forEach(function(g){
-            const val = ps[g.id];
-            const star = val === 2 ? '✓' : val === 1 ? '~' : '✗';
-            lines.push('    ' + star + ' ' + g.label + ': ' + val + '/2');
-          });
-        }
-      });
+      return;
     }
+
+    /* ── SECTION 1: Today's per-goal scores ── */
     lines.push('');
+    lines.push('  TODAY (' + fmtD + ')');
+    lines.push('  ' + '-'.repeat(42));
+
+    periods.forEach(function(period) {
+      const ps    = dayData[period]||{};
+      const label = period === 'HB' ? 'Home Base' : 'Period ' + period.replace('P','');
+      const scored = goals.filter(function(g){ return ps[g.id] != null; });
+
+      if (!scored.length) {
+        lines.push('  ' + label + ': no data entered');
+      } else {
+        const ptsEarned   = scored.reduce(function(s,g){ return s + (ps[g.id]||0); }, 0);
+        const ptsPossible = scored.length * 2;
+        const p           = ptsPossible ? Math.round(ptsEarned / ptsPossible * 100) : 0;
+        lines.push('  ' + label + ': ' + ptsEarned + '/' + ptsPossible + ' pts (' + p + '%)');
+        scored.forEach(function(g) {
+          const val  = ps[g.id];
+          const star = val === 2 ? '✓' : val === 1 ? '~' : '✗';
+          lines.push('    ' + star + ' ' + g.label + ': ' + val + '/2');
+        });
+      }
+    });
+
+    /* ── SECTION 2: Weekly tabulate summary ── */
+    lines.push('');
+    lines.push('  WEEK OVERVIEW');
+    lines.push('  ' + '-'.repeat(42));
+    lines.push('  ' + pad('Period', 10) + dayLabels.map(function(d){ return pad(d, COL); }).join('') + pad('Avg', COL));
+
+    let grandSum = 0, grandCount = 0;
+    periods.forEach(function(period) {
+      const label = period === 'HB' ? 'Home Base' : 'Period ' + period.replace('P','');
+      let pGrandSum = 0, pGrandCount = 0;
+      const dayCells = weekDates.map(function(dateKey) {
+        const ps = ((STATE.data[name]||{})[dateKey]||{})[period]||{};
+        let pSum = 0, pCount = 0;
+        goals.forEach(function(g){ const v = ps[g.id]; if (v != null){ pSum += v; pCount++; } });
+        if (pCount){ pGrandSum += pSum; pGrandCount += pCount; grandSum += pSum; grandCount += pCount; }
+        return pCount ? pct(pSum, pCount) + '%' : '—';
+      });
+      const avgCell = pGrandCount ? pct(pGrandSum, pGrandCount) + '%' : '—';
+      lines.push('  ' + pad(label, 10) + dayCells.map(function(c){ return pad(c, COL); }).join('') + pad(avgCell, COL));
+    });
+
+    const wkPct = grandCount ? pct(grandSum, grandCount) + '%' : '—';
+    lines.push('  ' + pad('WEEK %', 10) + ' '.repeat(COL * 5) + pad(wkPct, COL));
   });
 
-  lines.push('── END OF REPORT ──────────────────────────────────');
   lines.push('');
+  lines.push('── END OF REPORT ──────────────────────────────────');
   lines.push('Generated by Behavior System Pro');
 
   const body = encodeURIComponent(lines.join('\r\n'));
-
-  /* ── Open mailto link ───────────────────────────────────────────── */
-  const mailto = 'mailto:' + toAddresses + '?subject=' + subject + '&body=' + body;
-
-  // mailto URIs have a ~2,000-char limit in some clients; warn if too long
-  if (mailto.length > 1900) {
-    // Silently proceed – Outlook on Windows handles much longer URIs
-  }
-
-  window.location.href = mailto;
+  window.location.href = 'mailto:' + toAddresses + '?subject=' + subject + '&body=' + body;
   toast('Opening email in your mail client…', 'success');
 }
 
@@ -2847,53 +2873,44 @@ function doImportEmail() {
 
 /* Parse the plain-text email body generated by sendBehaviorEmail() */
 function parseEmailReport(text) {
-  const lines  = text.split(/\r?\n/);
-  let date     = '';
-  let teacher  = '';
-  let rows     = [];
-  let curStudent = null;
-  let curPeriod  = null;
-  let curGoalIdx = 0;
-  let curScores  = [];
-  let curEarned  = 0;
-  let curPossible= 0;
+  const lines = text.split(/\r?\n/);
+  let date    = '';
+  let teacher = '';
+  let rows    = [];
 
-  // Extract header fields
+  let curStudent  = null;
+  let curPeriod   = null;
+  let curScores   = [];
+  let curEarned   = 0;
+  let curPossible = 0;
+  let inToday     = false; // only parse goal scores from the TODAY section
+
   lines.forEach(function(line) {
+    // Header fields
     const dateLine    = line.match(/^Date:\s*(.+)/i);
     const teacherLine = line.match(/^Submitted by:\s*(.+)/i);
-    if (dateLine)    date    = parseDateLabel(dateLine[1].trim());
-    if (teacherLine) teacher = teacherLine[1].trim();
-  });
+    if (dateLine)    { date    = parseDateLabel(dateLine[1].trim()); return; }
+    if (teacherLine) { teacher = teacherLine[1].trim(); return; }
 
-  function flushPeriod() {
-    if (!curStudent || !curPeriod || !date) return;
-    // curScores is array of {goalLabel, val}
-    rows.push({
-      student:     curStudent,
-      date:        date,
-      period:      curPeriod,
-      scores:      curScores.map(function(s){ return s.val; }),
-      ptsEarned:   curEarned,
-      ptsPossible: curPossible,
-      pct:         curPossible ? Math.round(curEarned / curPossible * 100) : 0
-    });
-  }
-
-  lines.forEach(function(line) {
-    // Student header: "── Jordan K. ────"
-    const studentMatch = line.match(/^──\s+(.+?)\s+─+/);
+    // Student header: "══ Jordan K. ══..." or legacy "── Jordan K. ──..."
+    const studentMatch = line.match(/^[══─]{2}\s+(.+?)\s+[══─═─]+/);
     if (studentMatch && !line.match(/END OF REPORT/)) {
       flushPeriod();
-      curStudent  = studentMatch[1].trim();
-      curPeriod   = null;
-      curScores   = [];
-      curEarned   = 0;
-      curPossible = 0;
+      curStudent = studentMatch[1].trim();
+      curPeriod  = null;
+      curScores  = [];
+      inToday    = false;
       return;
     }
 
-    // Period header: "  Home Base: 6/8 pts (75%)" or "  Period 3: 6/8 pts (75%)"
+    // Section markers
+    if (/TODAY/i.test(line))        { inToday = true;  return; }
+    if (/WEEK OVERVIEW/i.test(line)){ inToday = false; return; }
+
+    // Only parse goal-level data from the TODAY section
+    if (!inToday) return;
+
+    // Period header: "  Home Base: 6/8 pts (75%)"
     const periodMatch = line.match(/^\s+(Home Base|Period\s+\d+):\s*(\d+)\/(\d+)\s+pts\s*\((\d+)%\)/i);
     if (periodMatch) {
       flushPeriod();
@@ -2905,26 +2922,38 @@ function parseEmailReport(text) {
       return;
     }
 
-    // Goal line: "    ✓ On Task: 2/2" or "    ~ Follow Directions: 1/2" or "    ✗ Respectful: 0/2"
+    // Goal line: "    ✓ On Task: 2/2"
     const goalMatch = line.match(/^\s+[✓~✗☑☐]\s+(.+?):\s*(\d+)\/\d+/);
     if (goalMatch && curPeriod) {
       curScores.push({ goalLabel: goalMatch[1].trim(), val: parseInt(goalMatch[2], 10) });
       return;
     }
 
-    // No-data line: "  Period 3: no data entered"
-    const noDataMatch = line.match(/^\s+(Home Base|Period\s+\d+):\s*no data entered/i);
-    if (noDataMatch) {
+    // No-data line
+    if (/^\s+(Home Base|Period\s+\d+):\s*no data entered/i.test(line)) {
       flushPeriod();
-      curPeriod   = null;
-      curScores   = [];
-      curEarned   = 0;
-      curPossible = 0;
+      curPeriod = null;
+      curScores = [];
     }
   });
 
   flushPeriod();
   return { date, teacher, rows };
+
+  function flushPeriod() {
+    if (!curStudent || !curPeriod || !date) return;
+    rows.push({
+      student:     curStudent,
+      date:        date,
+      period:      curPeriod,
+      scores:      curScores.map(function(s){ return s.val; }),
+      ptsEarned:   curEarned,
+      ptsPossible: curPossible,
+      pct:         curPossible ? Math.round(curEarned / curPossible * 100) : 0
+    });
+    curPeriod = null;
+    curScores = [];
+  }
 }
 
 /* Convert a display date like "Friday, October 9, 2026" back to YYYY-MM-DD */
